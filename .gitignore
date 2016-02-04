@@ -1,0 +1,8 @@
+BINARIES/
+.vs/
+ipch/
+Debug/
+Release/
+*.sdf
+*.opendb
+*.user
