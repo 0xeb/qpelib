@@ -25,6 +25,7 @@
 * ----------------------------------------------------------------------------- 
 *
 * 02/02/2016 - Initial version
+* 02/03/2016 - Consider PE file as a keyboard dll if it has at least on export indicating so
 */
 #include "stdafx.h"
 
@@ -60,7 +61,8 @@ static bool GetQuickInfo(
             if (strcmp(n, "KbdNlsLayerDescriptor") == 0)
                 n_kbd_exports++;
 
-            return (n_kbd_exports == 2) ? false : true;
+            // Stop if we match at least one
+            return (n_kbd_exports != 0) ? false : true;
         }
 
         virtual bool section(const IMAGE_SECTION_HEADER *section) override
@@ -82,7 +84,7 @@ static bool GetQuickInfo(
             return util.visit_exported_names(this);
         }
 
-        const bool is_keyboard_dll() const { return n_kbd_exports == 2; }
+        const bool is_keyboard_dll() const { return n_kbd_exports != 0; }
         const bool has_code_sections() const { return n_code_sections > 0; }
     };
 
