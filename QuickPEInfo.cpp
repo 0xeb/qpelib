@@ -26,6 +26,7 @@
 *
 * 02/02/2016 - Initial version
 * 02/03/2016 - Consider PE file as a keyboard dll if it has at least on export indicating so
+* 04/19/2016 - Added checks for Kd extension dlls
 */
 #include "stdafx.h"
 
@@ -36,6 +37,7 @@ struct QuickInfo_t
 {
     bool bIsKbd;
     bool bNoCode;
+    bool bIsKdExtension;
 };
 
 //--------------------------------------------------------------------------
@@ -48,11 +50,12 @@ static bool GetQuickInfo(
         return false;
 
     class qinfo_visitor_t : public peutil_t::exported_name_visitor_t,
-        public peutil_t::sections_visitor_t
+                            public peutil_t::sections_visitor_t
     {
     private:
         int n_kbd_exports;
         int n_code_sections;
+        bool b_is_kd_extension;
 
         virtual bool export_name(const char *n) override
         {
@@ -61,8 +64,10 @@ static bool GetQuickInfo(
             if (strcmp(n, "KbdNlsLayerDescriptor") == 0)
                 n_kbd_exports++;
 
-            // Stop if we match at least one
-            return (n_kbd_exports != 0) ? false : true;
+            if (strcmp(n, "KdInitializeLibrary") == 0)
+                b_is_kd_extension = true;
+
+            return true;
         }
 
         virtual bool section(const IMAGE_SECTION_HEADER *section) override
@@ -85,6 +90,7 @@ static bool GetQuickInfo(
         }
 
         const bool is_keyboard_dll() const { return n_kbd_exports != 0; }
+        const bool is_kd_extension_dll() const { return b_is_kd_extension; }
         const bool has_code_sections() const { return n_code_sections > 0; }
     };
 
@@ -93,6 +99,7 @@ static bool GetQuickInfo(
     {
         qi.bIsKbd = v.is_keyboard_dll();
         qi.bNoCode = !v.has_code_sections();
+        qi.bIsKdExtension = v.is_kd_extension_dll();
         return true;
     }
     else
@@ -115,9 +122,11 @@ static bool DumpAsXml(
         _TEXT("<QuickInfo>\n")
             _TEXT("\t<KeyboardDriver>%d</KeyboardDriver>\n")
             _TEXT("\t<HasCode>%d</HasCode>\n")
+           _TEXT("\t<IsKdExtension>%d</IsKdExtension>\n")
         _TEXT("</QuickInfo>\n"),
         qi.bIsKbd ? 1 : 0,
-        qi.bNoCode ? 0 : 1);
+        qi.bNoCode ? 0 : 1,
+        qi.bIsKdExtension ? 1 : 0);
 
     fclose(fp_out);
 
@@ -136,9 +145,11 @@ static bool DumpAsCSV(
     _ftprintf(
         fp_out,
         _TEXT("KeyboardDriver,%d\n")
-        _TEXT("HasCode,%d\n"),
+        _TEXT("HasCode,%d\n")
+        _TEXT("IsKdExtension,%d\n"),
         qi.bIsKbd ? 1 : 0,
-        qi.bNoCode ? 0 : 1);
+        qi.bNoCode ? 0 : 1,
+        qi.bIsKdExtension ? 1 : 0);
 
     fclose(fp_out);
 
