@@ -79,7 +79,7 @@ static bool GetQuickInfo(
         }
 
     public:
-        qinfo_visitor_t() : n_kbd_exports(0), n_code_sections(0)
+        qinfo_visitor_t() : n_kbd_exports(0), n_code_sections(0), b_is_kd_extension(false)
         {
         }
 
