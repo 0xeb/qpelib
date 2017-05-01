@@ -42,6 +42,7 @@ private:
     bool m_bIs64;
 
     long m_fsize;
+    long m_sections_pos;
 
     bool read_asciisz(
         size_t rva, 
@@ -78,7 +79,7 @@ public:
         virtual bool section(const IMAGE_SECTION_HEADER *section) = 0;
     };
 
-    peutil_t(): m_sections(nullptr), m_fp(nullptr), m_fsize(0)
+    peutil_t(): m_sections(nullptr), m_fp(nullptr), m_fsize(0), m_sections_pos(0)
     {
     }
 
@@ -103,8 +104,10 @@ public:
 
     bool open(LPCTSTR File)
     {
+        // Close previous file
         close();
 
+        // Open input file again
         if (_tfopen_s(&m_fp, File, _TEXT("rb")) != 0)
             return false;
 
@@ -128,7 +131,7 @@ public:
             if (fseek(m_fp, m_idh.e_lfanew, SEEK_SET) != 0)
                 break;
 
-            // Read NT headers 32
+            // Read NT headers 32 (in all cases)
             if (fread(&m_inh32, sizeof(m_inh32), 1, m_fp) != 1)
                 break;
 
@@ -136,11 +139,11 @@ public:
             if (m_inh32.Signature != IMAGE_NT_SIGNATURE)
                 break;
 
-            // Determine optional header size
+            // Determine the PE file's bitness
             m_bIs64 = m_inh32.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC;
             if (m_bIs64)
             {
-                // Go back and read the 64bit optional header
+                // Go back and read the 64bit version of the optional header
                 if (fseek(m_fp, m_idh.e_lfanew, SEEK_SET) != 0)
                     break;
 
@@ -148,7 +151,7 @@ public:
                     break;
             }
 
-            // Get number of sections
+            // Get the number of sections
             auto nb_sections = get_nb_sections();
 
             // Allocate section storage
@@ -157,7 +160,8 @@ public:
                 break;
 
             // Go to sections
-            if (fseek(m_fp, m_idh.e_lfanew + (m_bIs64 ? sizeof(m_inh64) : sizeof(m_inh32)), SEEK_SET) != 0)
+            m_sections_pos = m_idh.e_lfanew + (m_bIs64 ? sizeof(m_inh64) : sizeof(m_inh32));
+            if (fseek(m_fp, m_sections_pos, SEEK_SET) != 0)
                 break;
 
             // Read all sections
@@ -173,16 +177,27 @@ public:
         return bOk;
     }
 
-    bool read_buf_rva(size_t rva, void *buf, size_t buf_sz)
+    bool read_buf_rva(
+        size_t rva, 
+        void *buf, 
+        size_t buf_sz)
     {
         size_t phys;
         if (!rva2phys(rva, &phys))
             return false;
+        else
+            return read_buf_phys(phys, buf, buf_sz);
+    }
 
+    bool read_buf_phys(
+        size_t phys,
+        void *buf,
+        size_t buf_sz)
+    {
         if (fseek(m_fp, phys, SEEK_SET) != 0)
             return false;
-
-        return fread(buf, buf_sz, 1, m_fp) == 1;
+        else
+            return fread(buf, buf_sz, 1, m_fp) == 1;
     }
 
     bool visit_exported_names(exported_name_visitor_t *v)
@@ -236,6 +251,11 @@ public:
         return bOk;
     }
 
+    DWORD64 image_base()
+    {
+        return m_bIs64 ? m_inh64.OptionalHeader.ImageBase : m_inh32.OptionalHeader.ImageBase;
+    }
+
     void visit_sections(sections_visitor_t *visitor)
     {
         for (size_t i = 0, c = get_nb_sections(); i < c; i++)
@@ -259,6 +279,21 @@ public:
             {
                 if (phys != nullptr)
                     *phys = sec.PointerToRawData + (rva - sec.VirtualAddress);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool phys2rva(size_t phys, size_t *rva)
+    {
+        for (size_t i = 0, c = get_nb_sections(); i < c; i++)
+        {
+            auto &sec = m_sections[i];
+            if ((phys >= sec.PointerToRawData) && (phys < sec.PointerToRawData + sec.SizeOfRawData))
+            {
+                if (rva != nullptr)
+                    *rva = sec.VirtualAddress + (phys - sec.PointerToRawData);
                 return true;
             }
         }
