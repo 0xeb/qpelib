@@ -30,7 +30,7 @@
 //--------------------------------------------------------------------------
 class peutil_t
 {
-private:
+protected:
     FILE *m_fp;
     IMAGE_SECTION_HEADER *m_sections;
     IMAGE_DOS_HEADER m_idh;
@@ -70,6 +70,7 @@ public:
     class exported_name_visitor_t
     {
     public:
+        virtual bool begin(IMAGE_DATA_DIRECTORY *dir) = 0;
         virtual bool export_name(const char *name) = 0;
     };
 
@@ -202,16 +203,16 @@ public:
 
     bool visit_exported_names(exported_name_visitor_t *v)
     {
-        size_t rva = m_bIs64 ?   m_inh64.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress
-                               : m_inh32.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+        auto exp_idd = m_bIs64 ?   m_inh64.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT]
+                                 : m_inh32.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
 
         // No export directory
-        if (rva == 0)
+        if (!v->begin(&exp_idd) || exp_idd.VirtualAddress == 0)
             return true;
 
         // Read the image export directory
         IMAGE_EXPORT_DIRECTORY ied;
-        if (!read_buf_rva(rva, &ied, sizeof(ied)))
+        if (!read_buf_rva(exp_idd.VirtualAddress, &ied, sizeof(ied)))
             return false;
 
         // If there is an IED but no names then fail gracefully
