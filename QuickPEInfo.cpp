@@ -92,6 +92,12 @@ static bool GetQuickInfo(
         const bool is_keyboard_dll() const { return n_kbd_exports != 0; }
         const bool is_kd_extension_dll() const { return b_is_kd_extension; }
         const bool has_code_sections() const { return n_code_sections > 0; }
+
+        bool begin(IMAGE_DATA_DIRECTORY *dir) override
+        {
+            return true;
+        }
+
     };
 
     qinfo_visitor_t v;

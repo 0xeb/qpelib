@@ -96,6 +96,7 @@ public:
             delete[] m_sections;
             m_sections = nullptr;
         }
+
         if (m_fp != nullptr)
         {
             fclose(m_fp);
@@ -195,7 +196,7 @@ public:
         void *buf,
         size_t buf_sz)
     {
-        if (fseek(m_fp, phys, SEEK_SET) != 0)
+        if (fseek(m_fp, (long)phys, SEEK_SET) != 0)
             return false;
         else
             return fread(buf, buf_sz, 1, m_fp) == 1;
