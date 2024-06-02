@@ -25,10 +25,7 @@
 * ----------------------------------------------------------------------------- 
 *
 * 02/02/2016 - Initial version
-* 02/03/2016 - Consider PE file as a keyboard dll if it has at least on export indicating so
-* 04/19/2016 - Added checks for Kd extension dlls
 */
-#include "stdafx.h"
 
 #include "peutil.hpp"
 
@@ -49,7 +46,7 @@ static bool GetQuickInfo(
     if (!util.open(PEFile))
         return false;
 
-    class qinfo_visitor_t : public peutil_t::exported_name_visitor_t,
+    class qinfo_visitor_t : public peutil_t::exports_visitor_t,
                             public peutil_t::sections_visitor_t
     {
     private:
@@ -57,17 +54,22 @@ static bool GetQuickInfo(
         int n_code_sections;
         bool b_is_kd_extension;
 
-        virtual bool export_name(const char *n) override
-        {
-            if (strcmp(n, "KbdLayerDescriptor") == 0)
+        bool name(DWORD ordinal, DWORD eat_rva, const char* name) override 
+        { 
+            if (strcmp(name, "KbdLayerDescriptor") == 0)
                 n_kbd_exports++;
-            if (strcmp(n, "KbdNlsLayerDescriptor") == 0)
+            if (strcmp(name, "KbdNlsLayerDescriptor") == 0)
                 n_kbd_exports++;
 
-            if (strcmp(n, "KdInitializeLibrary") == 0)
+            if (strcmp(name, "KdInitializeLibrary") == 0)
                 b_is_kd_extension = true;
 
             return true;
+        }
+
+        bool ord(DWORD ordinal, DWORD eat_rva) override 
+        { 
+            return true; 
         }
 
         virtual bool section(const IMAGE_SECTION_HEADER *section) override
@@ -86,17 +88,12 @@ static bool GetQuickInfo(
         bool operator ()(peutil_t &util)
         {
             util.visit_sections(this);
-            return util.visit_exported_names(this);
+            return util.visit_exports(this);
         }
 
         const bool is_keyboard_dll() const { return n_kbd_exports != 0; }
         const bool is_kd_extension_dll() const { return b_is_kd_extension; }
         const bool has_code_sections() const { return n_code_sections > 0; }
-
-        bool begin(IMAGE_DATA_DIRECTORY *dir) override
-        {
-            return true;
-        }
 
     };
 
