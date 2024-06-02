@@ -4,26 +4,12 @@
 
 setlocal
 
-if not exist build (
-    mkdir build
-    pushd build
-    cmake -A x64 -G "Visual Studio 15" ..
-    popd
-)
-
-if not exist build64 (
-    mkdir build64
-    pushd build64
-    cmake -A x64 -G "Visual Studio 15" ..
-    popd
-)
+if not exist build cmake -B build -A Win32
+if not exist build64 cmake -B build64 -A x64
 
 if "%1"=="build" (
-    pushd build
-    cmake --build . --config Release
-    popd
-    pushd build64
-    cmake --build . --config Release
+    cmake --build build --config Release
+    cmake --build build64 --config Release
 )
 
 echo.
