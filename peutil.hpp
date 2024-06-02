@@ -1,4 +1,5 @@
 #pragma once
+
 /* -----------------------------------------------------------------------------
 * QuickPEInfo - Copyright (c) Elias Bachaalany <elias.bachaalany@gmail.com>
 * All rights reserved.
@@ -24,37 +25,49 @@
 * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 * SUCH DAMAGE.
 * -----------------------------------------------------------------------------
-*
-* 02/02/2016 - Initial version
 */
 
-#include <memory>
 #include <tchar.h>
-#include <Windows.h>
+#include <windows.h>
+#include <stdio.h>
+#include <map>
+#include <vector>
 
 //--------------------------------------------------------------------------
 class peutil_t
 {
 protected:
     FILE *m_fp = nullptr;
-	IMAGE_SECTION_HEADER* m_sections = nullptr;
+    std::vector<IMAGE_SECTION_HEADER> m_sections;
     IMAGE_DOS_HEADER m_idh;
     union
     {
-        IMAGE_NT_HEADERS32 m_inh32;
         IMAGE_NT_HEADERS64 m_inh64;
+        IMAGE_NT_HEADERS32 m_inh32;
     };
-    bool m_bIs64;
+    bool m_bIs64 = false;
 
-    long m_fsize;
-    long m_sections_pos;
+    long m_fsize = 0;
+    long m_sections_pos = 0;
 
 public:
-    class exported_name_visitor_t
+    class exports_visitor_t
     {
     public:
-        virtual bool begin(IMAGE_DATA_DIRECTORY *dir) = 0;
-        virtual bool export_name(const char *name, DWORD func_addr) = 0;
+        peutil_t* pe = nullptr;
+        virtual bool dir(const IMAGE_EXPORT_DIRECTORY* dir) { return true; }
+        virtual bool fwd_name(DWORD ordinal, const char* name, const char *fwd) { return true; }
+        virtual bool name(DWORD ordinal, DWORD eat_rva, const char* name) { return true; }
+        virtual bool ord(DWORD ordinal, DWORD eat_rva) { return true; }
+    };
+
+    class imports_visitor_t
+    {
+    public:
+        peutil_t* pe = nullptr;
+        virtual bool desc(const IMAGE_IMPORT_DESCRIPTOR* dir, const char *dllname) { return true; }
+        virtual bool name(const char* dll, const char* name, WORD hint, DWORD ibn_rva = 0) { return true; }
+        virtual bool ord(const char* dll, uint16_t ordinal, DWORD thunk_rva = 0) { return true; }
     };
 
     class sections_visitor_t
@@ -62,10 +75,6 @@ public:
     public:
         virtual bool section(const IMAGE_SECTION_HEADER *section) = 0;
     };
-
-    peutil_t(): m_sections(nullptr), m_fp(nullptr), m_fsize(0), m_sections_pos(0)
-    {
-    }
 
     ~peutil_t()
     {
@@ -79,7 +88,7 @@ public:
     
     bool read_asciisz(
         size_t rva,
-        char* buf,
+        char *buf,
         size_t buf_sz,
         size_t *str_len = nullptr)
     {
@@ -109,11 +118,7 @@ public:
 
     void close()
     {
-        if (m_sections != nullptr)
-        {
-            delete[] m_sections;
-            m_sections = nullptr;
-        }
+        m_sections.clear();
 
         if (m_fp != nullptr)
         {
@@ -175,9 +180,7 @@ public:
             auto nb_sections = get_nb_sections();
 
             // Allocate section storage
-            m_sections = new IMAGE_SECTION_HEADER[nb_sections];
-            if (m_sections == nullptr)
-                break;
+            m_sections.resize(nb_sections);
 
             // Go to sections
             m_sections_pos = m_idh.e_lfanew + (m_bIs64 ? sizeof(m_inh64) : sizeof(m_inh32));
@@ -185,7 +188,7 @@ public:
                 break;
 
             // Read all sections
-            if (fread(m_sections, sizeof(IMAGE_SECTION_HEADER), nb_sections, m_fp) != nb_sections)
+            if (fread(&m_sections[0], sizeof(IMAGE_SECTION_HEADER), nb_sections, m_fp) != nb_sections)
                 break;
 
             bOk = true;
@@ -198,9 +201,9 @@ public:
     }
 
     bool read_buf_rva(
-        size_t rva, 
+        const size_t rva, 
         void *buf, 
-        size_t buf_sz)
+        const size_t buf_sz)
     {
         size_t phys;
         if (!rva2phys(rva, &phys))
@@ -210,9 +213,9 @@ public:
     }
 
     bool read_buf_phys(
-        size_t phys,
+        const size_t phys,
         void *buf,
-        size_t buf_sz)
+        const size_t buf_sz)
     {
         if (fseek(m_fp, (long)phys, SEEK_SET) != 0)
             return false;
@@ -220,61 +223,127 @@ public:
             return fread(buf, buf_sz, 1, m_fp) == 1;
     }
 
-    bool visit_exported_names(exported_name_visitor_t *v)
+    inline const IMAGE_DATA_DIRECTORY *get_idd(size_t idd_idx) const
     {
-        auto exp_idd = m_bIs64 ?   m_inh64.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT]
-                                 : m_inh32.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        if (idd_idx >= IMAGE_NUMBEROF_DIRECTORY_ENTRIES)
+            return nullptr;
+
+        return m_bIs64 ? &m_inh64.OptionalHeader.DataDirectory[idd_idx]
+                       : &m_inh32.OptionalHeader.DataDirectory[idd_idx];
+    }
+
+    inline const IMAGE_DATA_DIRECTORY *iat_idd() const
+    {
+        return get_idd(IMAGE_DIRECTORY_ENTRY_IAT);
+    }
+
+    inline const IMAGE_DATA_DIRECTORY *exp_idd() const
+    {
+        return get_idd(IMAGE_DIRECTORY_ENTRY_EXPORT);
+    }
+
+    inline const IMAGE_DATA_DIRECTORY *imp_idd() const
+    {
+        return get_idd(IMAGE_DIRECTORY_ENTRY_IMPORT);
+    }
+
+    bool visit_exports(exports_visitor_t *v)
+    {
+        if (v != nullptr)
+            v->pe = this;
+
+        const auto exp_idd = this->exp_idd();
+
+        DWORD exp_rva = exp_idd->VirtualAddress;
+        DWORD exp_end_rva = exp_rva + exp_idd->Size;
 
         // No export directory
-        if (!v->begin(&exp_idd) || exp_idd.VirtualAddress == 0)
+        if (exp_rva == 0)
             return true;
 
         // Read the image export directory
         IMAGE_EXPORT_DIRECTORY ied;
-        if (!read_buf_rva(exp_idd.VirtualAddress, &ied, sizeof(ied)))
+        if (!read_buf_rva(exp_idd->VirtualAddress, &ied, sizeof(ied)))
             return false;
 
         // If there is an IED but no names then fail gracefully
-        if (ied.NumberOfNames == 0)
+        if (ied.NumberOfNames == 0 || (v != nullptr && !v->dir(&ied)))
             return true;
 
-        DWORD rva_addr_of_funcs = ied.AddressOfFunctions;
-
         bool bOk = false;
-
-        char name[MAX_PATH + 1] = { 0 };
+        char name[1024 + 1] = { 0 };
+        char fwd_name[1024 + 1] = { 0 };
         do
         {
-            // Read the names RVA
-            std::unique_ptr<DWORD[]> names_rvas_(new DWORD[ied.NumberOfNames]);
-            PDWORD names_rvas = names_rvas_.get();
-            if (!read_buf_rva(ied.AddressOfNames, names_rvas, sizeof(DWORD) * ied.NumberOfNames))
-                break;
+            std::vector<DWORD> names_rvas;
+            std::map<DWORD, DWORD> name_ordinals_map;
+            if (ied.NumberOfNames > 0)
+            {
+                // Read the whole names array
+                names_rvas.resize(ied.NumberOfNames);
+                if (!read_buf_rva(ied.AddressOfNames, &names_rvas[0], sizeof(DWORD) * names_rvas.size()))
+                    break;
 
-            // Address of functions
-            std::unique_ptr<DWORD[]> addr_rvas_(new DWORD[ied.NumberOfFunctions]);
-            PDWORD addr_rvas = addr_rvas_.get();
-            if (!read_buf_rva(ied.AddressOfFunctions, addr_rvas, sizeof(DWORD) * ied.NumberOfFunctions))
-                break;
+                // Read the names ordinals array and create the mapping
+                std::vector<WORD> name_ordinals;
+                name_ordinals.resize(ied.NumberOfNames);
+                if (!read_buf_rva(ied.AddressOfNameOrdinals, &name_ordinals[0], sizeof(WORD) * name_ordinals.size()))
+                    break;
 
-            // Names ordinals
-            std::unique_ptr<WORD[]> ordinals_(new WORD[ied.NumberOfNames]);
-            PWORD ordinals = ordinals_.get();
-            if (!read_buf_rva(ied.AddressOfNameOrdinals, ordinals, sizeof(WORD) * ied.NumberOfNames))
-                break;
+                for (size_t i = 0; i < name_ordinals.size(); i++)
+                    name_ordinals_map[name_ordinals[i]] = DWORD(i);
+            }
 
             bool bReadErr = false;
-            for (DWORD c = ied.NumberOfNames, i = 0; i < c; i++)
+            for (DWORD i=0, c = ied.NumberOfFunctions; i < c; i++)
             {
-                if (!read_asciisz(names_rvas[i], name, MAX_PATH - 1))
+                DWORD func_rva;
+                if (!read_buf_rva(ied.AddressOfFunctions + (i * sizeof(DWORD)), &func_rva, sizeof(DWORD)))
                 {
                     bReadErr = true;
                     break;
                 }
-                auto func_addr = addr_rvas[ordinals[i - ied.Base]];
-                name[MAX_PATH] = '\0';
-                if (v != nullptr && !v->export_name(name, func_addr))
-                    break;
+                // Unused
+                if (func_rva == 0)
+                    continue;
+
+                DWORD ordinal = i + ied.Base;
+
+                // Pure ordinal?
+                auto p = name_ordinals_map.find(i);
+                if (p == name_ordinals_map.end())
+                {
+                    if (v && !v->ord(ordinal, func_rva))
+                        return true;
+                }
+                else
+                {
+                    if (!read_asciisz(names_rvas[p->second], name, sizeof(name) - 2))
+                    {
+                        bReadErr = true;
+                        break;
+                    }
+                    name[sizeof(name) - 1] = '\0';
+
+                    // Forwarded name?
+                    if (func_rva >= exp_rva && func_rva <= exp_end_rva)
+                    {
+                        if (!read_asciisz(func_rva, fwd_name, sizeof(fwd_name) - 2))
+                        {
+                            bReadErr = true;
+                            break;
+                        }
+                        fwd_name[sizeof(fwd_name) - 1] = '\0';
+                        if (v != nullptr && !v->fwd_name(ordinal, name, fwd_name))
+                            return true;
+                    }
+                    // Named import
+                    else
+                    {
+                        if (v != nullptr && !v->name(ordinal, func_rva, name))
+                            return true;
+                    }
+                }
             }
             bOk = !bReadErr;
         } while (false);
@@ -282,26 +351,99 @@ public:
         return bOk;
     }
 
-    DWORD64 image_base()
+    bool visit_imports(imports_visitor_t *v)
     {
+        if (v != nullptr)
+            v->pe = this;
+
+        const auto imp_idd = this->imp_idd();
+
+        DWORD64 ord_mask = m_bIs64 ? 1ull << 63 : 1u << 31;
+
+        // No import directory
+        if (imp_idd->VirtualAddress == 0)
+            return true;
+        
+        char dllname[1024];
+        char api_name[1024*2];
+
+        for (DWORD iid_rva = imp_idd->VirtualAddress;; iid_rva += sizeof(IMAGE_IMPORT_DESCRIPTOR))
+        {
+            // Read the image import descriptor
+            IMAGE_IMPORT_DESCRIPTOR iid;
+            if (!read_buf_rva(iid_rva, &iid, sizeof(iid)))
+                return false;
+
+            if (iid.Name == 0)
+                break;
+
+            // Read DLL name
+            if (!read_asciisz(iid.Name, dllname, sizeof(dllname) - 1))
+                return false;
+
+            if (v != nullptr && !v->desc(&iid, dllname))
+                return true;
+
+            // Let's walk the OriginalFirstThunk table
+            DWORD thunk_data_size = m_bIs64 ? sizeof(DWORD64) : sizeof(DWORD);
+            for (DWORD thunk_rva = iid.FirstThunk;; thunk_rva += thunk_data_size)
+            {
+                DWORD64 thunk_data = 0;
+                if (!read_buf_rva(thunk_rva, &thunk_data, thunk_data_size))
+                    return false;
+
+                // End
+                if (thunk_data == 0)
+                    break;
+
+                if (thunk_data & ord_mask)
+                {
+                    if (v != nullptr && !v->ord(dllname, uint16_t(thunk_data & ~ord_mask), thunk_rva))
+                        return true;
+                }
+                else
+                {
+                    // Read the import by name
+                    DWORD ibn_rva = DWORD(thunk_data); //_IMAGE_IMPORT_BY_NAME rva;
+
+                    WORD hint;
+                    if (!read_buf_rva(ibn_rva, &hint, sizeof(hint)))
+                        return false;
+
+                    if (!read_asciisz(ibn_rva + sizeof(hint), api_name, sizeof(api_name) - 1))
+                        return false;
+
+                    if (v != nullptr && !v->name(dllname, api_name, hint, ibn_rva))
+                        return true;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    const DWORD64 image_base() const {
         return m_bIs64 ? m_inh64.OptionalHeader.ImageBase : m_inh32.OptionalHeader.ImageBase;
     }
 
     void visit_sections(sections_visitor_t *visitor)
     {
+        if (visitor == nullptr)
+            return;
+
         for (size_t i = 0, c = get_nb_sections(); i < c; i++)
         {
-            if (visitor != nullptr && !visitor->section(&m_sections[i]))
+            if (!visitor->section(&m_sections[i]))
                 break;
         }
     }
 
-    const size_t get_nb_sections() const {
+    const inline size_t get_nb_sections() const {
         return size_t(m_inh32.FileHeader.NumberOfSections);
     }
 
-    const PIMAGE_SECTION_HEADER get_sections() const {
-        return m_sections;
+    const IMAGE_SECTION_HEADER *get_sections() const {
+        return &m_sections[0];
     }
 
     bool rva2phys(size_t rva, size_t *phys)
