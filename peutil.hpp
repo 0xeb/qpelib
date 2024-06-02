@@ -1,5 +1,6 @@
+#pragma once
 /* -----------------------------------------------------------------------------
-* QuickPEInfo - Copyright (c) Elias Bachaalany <lallousz-x86@yahoo.com>
+* QuickPEInfo - Copyright (c) Elias Bachaalany <elias.bachaalany@gmail.com>
 * All rights reserved.
 *
 * Redistribution and use in source and binary forms, with or without
@@ -27,12 +28,16 @@
 * 02/02/2016 - Initial version
 */
 
+#include <memory>
+#include <tchar.h>
+#include <Windows.h>
+
 //--------------------------------------------------------------------------
 class peutil_t
 {
 protected:
-    FILE *m_fp;
-    IMAGE_SECTION_HEADER *m_sections;
+    FILE *m_fp = nullptr;
+	IMAGE_SECTION_HEADER* m_sections = nullptr;
     IMAGE_DOS_HEADER m_idh;
     union
     {
@@ -44,34 +49,12 @@ protected:
     long m_fsize;
     long m_sections_pos;
 
-    bool read_asciisz(
-        size_t rva, 
-        char *buf, 
-        size_t buf_sz)
-    {
-        size_t phys;
-        if (!rva2phys(rva, &phys))
-            return false;
-
-        long pos = long(phys);
-        if (pos >= m_fsize)
-            return false;
-
-        if (fseek(m_fp, pos, SEEK_SET) != 0)
-            return false;
-
-        long max_pos = min(pos + (long)buf_sz, m_fsize);
-        long max_sz = max_pos - pos;
-
-        return fread(buf, 1, max_sz, m_fp) == max_sz;
-    }
-
 public:
     class exported_name_visitor_t
     {
     public:
         virtual bool begin(IMAGE_DATA_DIRECTORY *dir) = 0;
-        virtual bool export_name(const char *name) = 0;
+        virtual bool export_name(const char *name, DWORD func_addr) = 0;
     };
 
     class sections_visitor_t
@@ -87,6 +70,41 @@ public:
     ~peutil_t()
     {
         close();
+    }
+
+    const bool is_peplus() const
+    {
+        return m_bIs64;
+    }
+    
+    bool read_asciisz(
+        size_t rva,
+        char* buf,
+        size_t buf_sz,
+        size_t *str_len = nullptr)
+    {
+        if (str_len)
+            *str_len = 0;
+        
+        size_t phys;
+        if (!rva2phys(rva, &phys))
+            return false;
+
+        if (fseek(m_fp, (long)phys, SEEK_SET) != 0)
+            return false;
+        
+        while (buf_sz != 0)
+        {
+            if (fread(buf, 1, 1, m_fp) == 0)
+                break;
+            buf_sz -= 1;
+            if (str_len)
+                *str_len += 1;
+            
+            if (*buf++ == '\0')
+                return true;
+        }
+        return false;
     }
 
     void close()
@@ -220,17 +238,29 @@ public:
         if (ied.NumberOfNames == 0)
             return true;
 
-        // Read the names RVA
-        PDWORD names_rvas = new DWORD[ied.NumberOfNames];
-        if (names_rvas == nullptr)
-            return false;
+        DWORD rva_addr_of_funcs = ied.AddressOfFunctions;
 
         bool bOk = false;
 
         char name[MAX_PATH + 1] = { 0 };
         do
         {
+            // Read the names RVA
+            std::unique_ptr<DWORD[]> names_rvas_(new DWORD[ied.NumberOfNames]);
+            PDWORD names_rvas = names_rvas_.get();
             if (!read_buf_rva(ied.AddressOfNames, names_rvas, sizeof(DWORD) * ied.NumberOfNames))
+                break;
+
+            // Address of functions
+            std::unique_ptr<DWORD[]> addr_rvas_(new DWORD[ied.NumberOfFunctions]);
+            PDWORD addr_rvas = addr_rvas_.get();
+            if (!read_buf_rva(ied.AddressOfFunctions, addr_rvas, sizeof(DWORD) * ied.NumberOfFunctions))
+                break;
+
+            // Names ordinals
+            std::unique_ptr<WORD[]> ordinals_(new WORD[ied.NumberOfNames]);
+            PWORD ordinals = ordinals_.get();
+            if (!read_buf_rva(ied.AddressOfNameOrdinals, ordinals, sizeof(WORD) * ied.NumberOfNames))
                 break;
 
             bool bReadErr = false;
@@ -241,14 +271,13 @@ public:
                     bReadErr = true;
                     break;
                 }
+                auto func_addr = addr_rvas[ordinals[i - ied.Base]];
                 name[MAX_PATH] = '\0';
-                if (v != nullptr && !v->export_name(name))
+                if (v != nullptr && !v->export_name(name, func_addr))
                     break;
             }
             bOk = !bReadErr;
         } while (false);
-
-        delete[] names_rvas;
 
         return bOk;
     }
@@ -267,9 +296,12 @@ public:
         }
     }
 
-    const inline size_t get_nb_sections() const
-    {
+    const size_t get_nb_sections() const {
         return size_t(m_inh32.FileHeader.NumberOfSections);
+    }
+
+    const PIMAGE_SECTION_HEADER get_sections() const {
+        return m_sections;
     }
 
     bool rva2phys(size_t rva, size_t *phys)
