@@ -55,7 +55,7 @@ public:
     {
     public:
         qpeutil_t* pe = nullptr;
-        virtual bool dir(const IMAGE_EXPORT_DIRECTORY* dir) { return true; }
+        virtual bool dir(const IMAGE_EXPORT_DIRECTORY &dir) { return true; }
         virtual bool fwd_name(DWORD ordinal, const char* name, const char *fwd) { return true; }
         virtual bool name(DWORD ordinal, DWORD eat_rva, const char* name) { return true; }
         virtual bool ord(DWORD ordinal, DWORD eat_rva) { return true; }
@@ -65,9 +65,18 @@ public:
     {
     public:
         qpeutil_t* pe = nullptr;
-        virtual bool desc(const IMAGE_IMPORT_DESCRIPTOR* dir, const char *dllname) { return true; }
+        virtual bool desc(const IMAGE_IMPORT_DESCRIPTOR &dir, const char *dllname) { return true; }
         virtual bool name(const char* dll, const char* name, WORD hint, DWORD ibn_rva = 0) { return true; }
         virtual bool ord(const char* dll, uint16_t ordinal, DWORD thunk_rva = 0) { return true; }
+    };
+
+    class reloc_visitor_t
+    {
+    public:
+        qpeutil_t* pe = nullptr;
+        virtual bool dir(const IMAGE_DATA_DIRECTORY &dir) { return true; }
+        virtual bool block(const IMAGE_BASE_RELOCATION &block, DWORD block_rva, DWORD nb_entries) { return true; }
+        virtual bool entry(const DWORD entry_rva, const WORD type, const WORD offset, DWORD reloc_rva) { return true; } 
     };
 
     class sections_visitor_t
@@ -237,6 +246,11 @@ public:
         return get_idd(IMAGE_DIRECTORY_ENTRY_IAT);
     }
 
+    inline const IMAGE_DATA_DIRECTORY* reloc_idd() const
+    {
+        return get_idd(IMAGE_DIRECTORY_ENTRY_BASERELOC);
+    }
+
     inline const IMAGE_DATA_DIRECTORY *exp_idd() const
     {
         return get_idd(IMAGE_DIRECTORY_ENTRY_EXPORT);
@@ -247,6 +261,63 @@ public:
         return get_idd(IMAGE_DIRECTORY_ENTRY_IMPORT);
     }
 
+    bool visit_relocs(reloc_visitor_t *v)
+    {
+        const auto reloc_idd = this->reloc_idd();
+
+        if (v != nullptr)
+        {
+            v->pe = this;
+            v->dir(*reloc_idd);
+        }
+
+        // No reloc directory
+        if (reloc_idd->VirtualAddress == 0)
+            return true;
+
+        // Read the image base relocation directory
+        IMAGE_BASE_RELOCATION ibr;
+        if (!read_buf_rva(reloc_idd->VirtualAddress, &ibr, sizeof(ibr)))
+            return false;
+
+        DWORD reloc_rva = reloc_idd->VirtualAddress;
+        DWORD reloc_end_rva = reloc_rva + reloc_idd->Size;
+
+        for (DWORD reloc_rva = reloc_idd->VirtualAddress; reloc_rva < reloc_end_rva;)
+        {
+            // Read the image base relocation block
+            IMAGE_BASE_RELOCATION ibr;
+            if (!read_buf_rva(reloc_rva, &ibr, sizeof(ibr)))
+                return false;
+
+            // Calculate the number of entries
+            DWORD nb_entries = (ibr.SizeOfBlock - sizeof(ibr)) / sizeof(WORD);
+
+            // Call the visitor
+            if (!v->block(ibr, reloc_rva, nb_entries))
+                return false;
+
+            DWORD rva = reloc_rva + sizeof(ibr);
+            auto entries = std::vector<WORD>(nb_entries);
+            if (!read_buf_rva(rva, &entries[0], sizeof(WORD) * nb_entries))
+                return false;
+            
+            // Visit each entry
+            for (size_t i = 0; i < nb_entries; i++)
+            {
+                const WORD offset = entries[i] & 0xFFF;
+                if (!v->entry(rva, entries[i] >> 12, offset, ibr.VirtualAddress + offset))
+                    return false;
+                rva += sizeof(WORD);
+            }
+
+            // Next block
+            reloc_rva += ibr.SizeOfBlock;
+        }
+
+        return true;
+    }
+    
     bool visit_exports(exports_visitor_t *v)
     {
         if (v != nullptr)
@@ -267,7 +338,7 @@ public:
             return false;
 
         // If there is an IED but no names then fail gracefully
-        if (ied.NumberOfNames == 0 || (v != nullptr && !v->dir(&ied)))
+        if (ied.NumberOfNames == 0 || (v != nullptr && !v->dir(ied)))
             return true;
 
         bool bOk = false;
@@ -381,7 +452,7 @@ public:
             if (!read_asciisz(iid.Name, dllname, sizeof(dllname) - 1))
                 return false;
 
-            if (v != nullptr && !v->desc(&iid, dllname))
+            if (v != nullptr && !v->desc(iid, dllname))
                 return true;
 
             // Let's walk the OriginalFirstThunk table
